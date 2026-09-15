@@ -1,0 +1,13 @@
+# SCALA / SBT
+scala/target/
+scala/.bsp/
+scala/project/target/
+scala/project/project/
+
+# DATOS GENERADOS
+data/entrada/scala_metrics.json
+data/salida/
+
+# SISTEMA
+.DS_Store
+Thumbs.db
