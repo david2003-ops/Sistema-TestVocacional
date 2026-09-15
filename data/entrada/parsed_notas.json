@@ -1,0 +1,34 @@
+{
+  "archivo_analizado": "certificado_estudios_prueba_2.pdf",
+  "promedio_general": 15.14,
+  "materias": [
+    {
+      "nombre": "Matemática",
+      "nota": 19.0
+    },
+    {
+      "nombre": "Comunicación",
+      "nota": 11.0
+    },
+    {
+      "nombre": "Ciencia y Tecnología",
+      "nota": 15.0
+    },
+    {
+      "nombre": "Historia y Ciencias Sociales",
+      "nota": 14.0
+    },
+    {
+      "nombre": "Inglés",
+      "nota": 16.0
+    },
+    {
+      "nombre": "Informática",
+      "nota": 17.0
+    },
+    {
+      "nombre": "Orientación Vocacional",
+      "nota": 14.0
+    }
+  ]
+}
