@@ -1,88 +1,168 @@
+"""Extrae materias y calificaciones desde PDF con texto seleccionable.
+
+Compatible con el uso anterior: python python/parser.py --file certificado.pdf
+También admite --input y --output para aislar cada extracción en la API.
+"""
+
 import argparse
 import json
-import os
+from pathlib import Path
 import re
+import sys
+
 from pypdf import PdfReader
 
-def main():
-    parser = argparse.ArgumentParser(description="Parser dinámico de certificados PDF")
-    parser.add_argument('--file', required=True, help="Nombre del archivo PDF en data/entrada")
-    args = parser.parse_args()
+from validador import (
+    validar_archivo_pdf,
+    validar_materias,
+    ValidacionError,
+    MAX_PDF_PAGES,
+)
+from analizador import analizar_materias
 
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    input_path = os.path.join(base_dir, 'data', 'entrada', args.file)
-    output_json_path = os.path.join(base_dir, 'data', 'entrada', 'parsed_notas.json')
 
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"No se encontró el archivo: {input_path}")
+NOTA = r"(?:20(?:[.,]0+)?|1[0-9](?:[.,][0-9]+)?|0?[0-9](?:[.,][0-9]+)?)"
+PATRON_NOTA = re.compile(rf"^{NOTA}$")
+PATRON_MATERIA = re.compile(
+    rf"^(?P<nombre>.+?)\s+(?P<nota>{NOTA})(?:\s+(?:APROBADO|DESAPROBADO))?$",
+    re.IGNORECASE,
+)
+PATRON_PROMEDIO = re.compile(r"promedio\s+(?:general|final)", re.IGNORECASE)
+PATRON_NUMERO = re.compile(r"\b\d+(?:[.,]\d+)?\b")
+PALABRAS_DESCARTADAS = (
+    "escala", "asignatura", "calificacion", "calificación", "promedio",
+    "documento", "estudiante", "nombre", "grado", "resultado",
+    "periodo", "período", "codigo", "código", "dni", "firma",
+)
 
-    reader = PdfReader(input_path)
-    full_text = ""
-    for page in reader.pages:
-        full_text += (page.extract_text() or "") + "\n"
 
-    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-    
+def es_materia(nombre: str) -> bool:
+    t = " ".join(nombre.lower().strip(" :-").split())
+    # Evita interpretar escalas como "0 a 20" como materias "0 a" con nota 20.
+    if len(t) < 3 or not any(letra.isalpha() for letra in t) or t[0].isdigit():
+        return False
+    return not any(t.startswith(p) for p in PALABRAS_DESCARTADAS)
+
+
+def extraer_texto_pdf(archivo: Path) -> str:
+    validar_archivo_pdf(archivo)
+    try:
+        lector = PdfReader(str(archivo), strict=False)
+        if lector.is_encrypted:
+            raise ValidacionError("El PDF está protegido con contraseña.")
+        paginas = len(lector.pages)
+        if paginas == 0 or paginas > MAX_PDF_PAGES:
+            raise ValidacionError(f"El PDF debe tener entre 1 y {MAX_PDF_PAGES} páginas.")
+        texto = "\n".join((pagina.extract_text() or "") for pagina in lector.pages)
+    except ValidacionError:
+        raise
+    except Exception as exc:
+        raise ValidacionError("No se pudo leer el PDF. Comprueba que no esté dañado.") from exc
+    if not texto.strip():
+        raise ValidacionError(
+            "El PDF no contiene texto seleccionable. Si es una imagen escaneada, "
+            "necesitarás OCR (aún no implementado)."
+        )
+    return texto
+
+
+def extraer_datos_de_texto(texto: str) -> dict:
+    """Función pura para probar sin crear archivos PDF."""
+    lineas = [line.strip() for line in texto.splitlines() if line.strip()]
     materias = []
-    promedio_general = None
-    ignore_words = ["asignatura", "nota", "resultado", "escala", "calificación", "aprobado", "desaprobado", "ciclo", "periodo", "promedio general"]
-
+    promedio_documento = None
     i = 0
-    while i < len(lines):
-        line = lines[i]
-        line_low = line.lower()
+    while i < len(lineas):
+        linea = lineas[i]
 
-        # Detectar promedio general
-        if "promedio general" in line_low:
-            num_match = re.search(r'(\d+(?:\.\d+)?)', line)
-            if not num_match and i + 1 < len(lines):
-                num_match = re.search(r'(\d+(?:\.\d+)?)', lines[i+1])
-            if num_match:
-                promedio_general = float(num_match.group(1))
+        if PATRON_PROMEDIO.search(linea):
+            despues = PATRON_PROMEDIO.split(linea, maxsplit=1)[-1].strip(" :")
+            candidato = PATRON_NUMERO.search(despues)
+            if candidato is None and i + 1 < len(lineas):
+                siguiente = lineas[i + 1]
+                candidato = PATRON_NOTA.fullmatch(siguiente)
+                if candidato:
+                    i += 1
+            if candidato:
+                valor = float(candidato.group(0).replace(",", "."))
+                if 0 <= valor <= 20:
+                    promedio_documento = valor
             i += 1
             continue
 
-        # Ignorar líneas basura o de encabezado puro con números que no son notas de materias
-        if any(w in line_low for w in ["escala", "asignatura nota"]):
-            i += 1
-            continue
-
-        # Patrón A: Línea con texto de materia, siguiente línea la nota numérica (0-20)
-        if not re.search(r'\d', line) and i + 1 < len(lines):
-            next_line = lines[i+1].strip()
-            grade_match = re.search(r'^(20|1[0-9]|0?[0-9])(?:\.\d+)?$', next_line)
-            if grade_match and not any(w in line_low for w in ignore_words):
+        # Formato partido: "Matemática" + salto de línea + "18.75".
+        if i + 1 < len(lineas) and es_materia(linea):
+            siguiente = PATRON_NOTA.fullmatch(lineas[i + 1])
+            if siguiente:
                 materias.append({
-                    "nombre": line,
-                    "nota": float(grade_match.group(0))
+                    "nombre": linea.strip(" :-"),
+                    "nota": float(siguiente.group(0).replace(",", ".")),
                 })
                 i += 2
                 continue
 
-        # Patrón B: Línea unificada tipo "Matemática 18" o "Matemática 18 Aprobado"
-        single_match = re.search(r'^([^\d]+?)\s+(20|1[0-9]|0?[0-9])(?:\.\d+)?(?:\s+(Aprobado|Desaprobado))?$', line, re.IGNORECASE)
-        if single_match:
-            sub_name = single_match.group(1).strip()
-            if not any(w in sub_name.lower() for w in ignore_words) and len(sub_name) > 2:
-                materias.append({
-                    "nombre": sub_name,
-                    "nota": float(single_match.group(2))
-                })
-                i += 1
-                continue
-
+        # Formato de una línea: "Matemática 18.75 Aprobado".
+        encontrado = PATRON_MATERIA.fullmatch(linea)
+        if encontrado and es_materia(encontrado.group("nombre")):
+            materias.append({
+                "nombre": encontrado.group("nombre").strip(" :-"),
+                "nota": float(encontrado.group("nota").replace(",", ".")),
+            })
         i += 1
 
-    parsed_data = {
-        "archivo_analizado": args.file,
-        "promedio_general": promedio_general,
-        "materias": materias
+    materias_limpias, advertencias = validar_materias(materias)
+    analisis = analizar_materias(materias_limpias)
+    if promedio_documento is not None and abs(promedio_documento - analisis["promedio_calculado"]) > 0.2:
+        advertencias.append(
+            "El promedio indicado en el documento difiere del promedio simple "
+            "calculado; verifica si la institución usa ponderaciones por año o crédito."
+        )
+    return {
+        "promedio_general": promedio_documento,
+        "materias": materias_limpias,
+        "analisis": analisis,
+        "advertencias": advertencias,
     }
 
-    with open(output_json_path, 'w', encoding='utf-8') as f:
-        json.dump(parsed_data, f, indent=2, ensure_ascii=False)
 
-    print(json.dumps({"status": "parsed_ok", "json_path": output_json_path, "extracted_count": len(materias)}))
+def main() -> int:
+    argumentos = argparse.ArgumentParser(description="Extrae calificaciones de un certificado PDF")
+    seleccion = argumentos.add_mutually_exclusive_group(required=True)
+    seleccion.add_argument("--file", help="Nombre del PDF dentro de data/entrada (modo anterior)")
+    seleccion.add_argument("--input", help="Ruta completa al PDF (modo API)")
+    argumentos.add_argument("--output", help="Ruta JSON de salida, opcional")
+    args = argumentos.parse_args()
+    base = Path(__file__).resolve().parent.parent
 
-if __name__ == '__main__':
-    main()
+    if args.file:
+        if Path(args.file).name != args.file:
+            print("--file solo admite el nombre del PDF, sin rutas.", file=sys.stderr)
+            return 1
+        archivo = base / "data" / "entrada" / args.file
+    else:
+        archivo = Path(args.input).resolve()
+    salida = Path(args.output).resolve() if args.output else base / "data" / "entrada" / "parsed_notas.json"
+    try:
+        resultados = extraer_datos_de_texto(extraer_texto_pdf(archivo))
+        parsed = {
+            "archivo_analizado": archivo.name,
+            "promedio_general": resultados["promedio_general"],
+            "materias": resultados["materias"],
+            "analisis": resultados["analisis"],
+            "advertencias": resultados["advertencias"],
+        }
+        salida.parent.mkdir(parents=True, exist_ok=True)
+        salida.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps({
+            "status": "parsed_ok", "json_path": str(salida),
+            "extracted_count": len(parsed["materias"]),
+            "advertencias": parsed["advertencias"],
+        }, ensure_ascii=False))
+        return 0
+    except (ValidacionError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
