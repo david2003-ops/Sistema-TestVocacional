@@ -1,221 +1,95 @@
 import { NextResponse } from 'next/server'
-import { writeFile, mkdir } from 'fs/promises'
-import path from 'path'
-import { exec } from 'child_process'
-import util from 'util'
-import fsSync from 'fs'
+import path from 'node:path'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { comandoPython, ejecutarProceso } from '@/lib/ejecutar-proceso'
 
-const execPromise = util.promisify(exec)
+export const runtime = 'nodejs'
+
+// Los procesos Scala y Prolog originales usan rutas fijas. En el modo local
+// demostrativo, serializamos las evaluaciones para evitar mezclar resultados.
+// Para producción/múltiples instancias se requiere una cola o trabajos aislados.
+let cola: Promise<unknown> = Promise.resolve()
+function exclusivo<T>(tarea: () => Promise<T>): Promise<T> {
+  const siguiente = cola.then(tarea, tarea)
+  cola = siguiente.then(() => undefined, () => undefined)
+  return siguiente
+}
+
+async function evaluarConPipeline(contenido: unknown) {
+  const base = path.resolve(process.cwd(), '..')
+  const carpetaEntrada = path.join(base, 'data', 'entrada')
+  const carpetaSalida = path.join(base, 'data', 'salida')
+  const rutaParsed = path.join(carpetaEntrada, 'parsed_notas.json')
+  const rutaScala = path.join(carpetaEntrada, 'scala_metrics.json')
+  const rutaProlog = path.join(carpetaSalida, 'resultado_vocacional.json')
+
+  // Primero Python valida las notas confirmadas y vuelve a calcular el análisis.
+  let pythonResultado: {
+    parsedData: { archivo_analizado: string; materias: { nombre: string; nota: number }[]; promedio_general: number }
+    analisis: unknown
+    advertencias: string[]
+  }
+  try {
+    const texto = await ejecutarProceso(comandoPython(), [
+      path.join(base, 'python', 'procesar_notas.py'),
+    ], { cwd: base, stdin: JSON.stringify(contenido), timeoutMs: 10_000 })
+    pythonResultado = JSON.parse(texto)
+  } catch (error) {
+    const mensaje = error instanceof Error ? error.message : 'Las notas no son válidas.'
+    throw Object.assign(new Error(mensaje), { esValidacion: true })
+  }
+
+  await mkdir(carpetaEntrada, { recursive: true })
+  await mkdir(carpetaSalida, { recursive: true })
+  // Evitar presentar el JSON viejo si un proceso falla.
+  await Promise.all([rm(rutaScala, { force: true }), rm(rutaProlog, { force: true })])
+  await writeFile(rutaParsed, JSON.stringify(pythonResultado.parsedData, null, 2), 'utf8')
+
+  const scalaDir = path.join(base, 'scala')
+  if (process.platform === 'win32') {
+    await ejecutarProceso('cmd.exe', ['/d', '/s', '/c', 'sbt', 'run'], {
+      cwd: scalaDir, timeoutMs: 180_000,
+    })
+  } else {
+    await ejecutarProceso('sbt', ['run'], { cwd: scalaDir, timeoutMs: 180_000 })
+  }
+  await ejecutarProceso('swipl', [
+    '-q', '-s', 'recomendador.pl', '-g', 'guardar_resultado,halt',
+  ], { cwd: path.join(base, 'prolog'), timeoutMs: 30_000 })
+
+  const [scalaMetrics, resultadoVocacional] = await Promise.all([
+    readFile(rutaScala, 'utf8').then(JSON.parse),
+    readFile(rutaProlog, 'utf8').then(JSON.parse),
+  ])
+  return {
+    status: 'success',
+    pipeline: '[PY] ➔ [SCALA] ➔ [PROLOG] completados',
+    parsedData: pythonResultado.parsedData,
+    analisis: pythonResultado.analisis,
+    advertencias: pythonResultado.advertencias,
+    scalaMetrics,
+    resultadoVocacional,
+  }
+}
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData()
-    const file = formData.get('file') as File | null
-
-    if (!file) {
-      return NextResponse.json(
-        { error: 'No se adjuntó ningún archivo' },
-        { status: 400 }
-      )
+    const texto = await request.text()
+    if (texto.length > 40_000) {
+      return NextResponse.json({ error: 'La evaluación supera el tamaño permitido.' }, { status: 413 })
     }
-
-    // =====================================================
-    // RUTAS PRINCIPALES
-    // =====================================================
-
-    const baseDir = path.join(process.cwd(), '..')
-
-    const uploadDir = path.join(
-      baseDir,
-      'data',
-      'entrada'
-    )
-
-    const outputDir = path.join(
-      baseDir,
-      'data',
-      'salida'
-    )
-
-    await mkdir(uploadDir, { recursive: true })
-    await mkdir(outputDir, { recursive: true })
-
-    // =====================================================
-    // GUARDAR PDF
-    // =====================================================
-
-    const filePath = path.join(
-      uploadDir,
-      file.name
-    )
-
-    const buffer = Buffer.from(
-      await file.arrayBuffer()
-    )
-
-    await writeFile(
-      filePath,
-      buffer
-    )
-
-    // =====================================================
-    // 1. PYTHON
-    // PDF -> parsed_notas.json
-    // =====================================================
-
-    const pythonScriptPath = path.join(
-      baseDir,
-      'python',
-      'parser.py'
-    )
-
-    await execPromise(
-      `python "${pythonScriptPath}" --file "${file.name}"`
-    )
-
-    // =====================================================
-    // 2. SCALA
-    // parsed_notas.json -> scala_metrics.json
-    // =====================================================
-
-    const scalaDir = path.join(
-      baseDir,
-      'scala'
-    )
-
-    if (!fsSync.existsSync(scalaDir)) {
-      throw new Error(
-        'No se encontró la carpeta Scala'
-      )
+    let payload: unknown
+    try {
+      payload = JSON.parse(texto)
+    } catch {
+      return NextResponse.json({ error: 'Los datos enviados no son JSON válido.' }, { status: 400 })
     }
-
-    await execPromise(
-      `sbt "run"`,
-      {
-        cwd: scalaDir
-      }
-    )
-
-    // =====================================================
-    // 3. PROLOG
-    // scala_metrics.json -> resultado_vocacional.json
-    // =====================================================
-
-    const prologDir = path.join(
-      baseDir,
-      'prolog'
-    )
-
-    const recomendadorPath = path.join(
-      prologDir,
-      'recomendador.pl'
-    )
-
-    if (!fsSync.existsSync(recomendadorPath)) {
-      throw new Error(
-        'No se encontró prolog/recomendador.pl'
-      )
-    }
-
-    await execPromise(
-      `swipl -q -s "recomendador.pl" -g "guardar_resultado,halt"`,
-      {
-        cwd: prologDir
-      }
-    )
-
-    // =====================================================
-    // 4. LEER RESULTADOS
-    // =====================================================
-
-    const parsedJsonPath = path.join(
-      uploadDir,
-      'parsed_notas.json'
-    )
-
-    const scalaMetricsPath = path.join(
-      uploadDir,
-      'scala_metrics.json'
-    )
-
-    const resultadoVocacionalPath = path.join(
-      outputDir,
-      'resultado_vocacional.json'
-    )
-
-    if (!fsSync.existsSync(parsedJsonPath)) {
-      throw new Error(
-        'Python no generó parsed_notas.json'
-      )
-    }
-
-    if (!fsSync.existsSync(scalaMetricsPath)) {
-      throw new Error(
-        'Scala no generó scala_metrics.json'
-      )
-    }
-
-    if (!fsSync.existsSync(resultadoVocacionalPath)) {
-      throw new Error(
-        'Prolog no generó resultado_vocacional.json'
-      )
-    }
-
-    const parsedData = JSON.parse(
-      fsSync.readFileSync(
-        parsedJsonPath,
-        'utf8'
-      )
-    )
-
-    const scalaMetrics = JSON.parse(
-      fsSync.readFileSync(
-        scalaMetricsPath,
-        'utf8'
-      )
-    )
-
-    const resultadoVocacional = JSON.parse(
-      fsSync.readFileSync(
-        resultadoVocacionalPath,
-        'utf8'
-      )
-    )
-
-    // =====================================================
-    // RESPUESTA FINAL
-    // =====================================================
-
-    return NextResponse.json({
-      status: 'success',
-
-      pipeline:
-        '[PY] ➔ [SCALA] ➔ [PROLOG] completados',
-
-      parsedData,
-
-      scalaMetrics,
-
-      resultadoVocacional
-    })
-
-  } catch (err: any) {
-
-    console.error(
-      'Error en pipeline:',
-      err
-    )
-
-    return NextResponse.json(
-      {
-        status: 'error',
-        error:
-          err?.message ||
-          'Error desconocido en el pipeline'
-      },
-      {
-        status: 500
-      }
-    )
+    const resultado = await exclusivo(() => evaluarConPipeline(payload))
+    return NextResponse.json(resultado)
+  } catch (error) {
+    console.error('Error del pipeline:', error)
+    const mensaje = error instanceof Error ? error.message : 'Falló la evaluación.'
+    const esValidacion = Boolean(error && typeof error === 'object' && 'esValidacion' in error)
+    return NextResponse.json({ status: 'error', error: mensaje }, { status: esValidacion ? 400 : 500 })
   }
 }

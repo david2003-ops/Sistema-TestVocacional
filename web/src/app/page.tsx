@@ -1,489 +1,295 @@
-"use client"
+'use client'
 
-import { useState } from "react"
+import { useState } from 'react'
 
-type Recomendacion = {
-  carrera: string
-  compatibilidad: number
+type Materia = { nombre: string; nota: number }
+type MateriaEdit = { nombre: string; nota: string }
+type Analisis = {
+  promedio_calculado: number
+  materias_analizadas: number
+  fortalezas: Materia[]
+  areas_por_reforzar: Materia[]
+  areas_detectadas: string[]
+  nota_metodologica: string
 }
-
+type ParsedData = { archivo_analizado: string; promedio_general: number | null; materias: Materia[] }
+type Preview = {
+  status: string
+  parsedData: ParsedData
+  analisis: Analisis
+  advertencias: string[]
+}
+type Recomendacion = { carrera: string; compatibilidad: number }
 type ResultadoVocacional = {
   perfil_dominante: string
   perfiles: Record<string, number>
   recomendaciones: Recomendacion[]
 }
-
-type PipelineResult = {
+type Evaluacion = {
   status: string
   pipeline: string
-  parsedData?: any
-  scalaMetrics?: any
-  resultadoVocacional?: ResultadoVocacional
+  parsedData: ParsedData
+  analisis: Analisis
+  advertencias: string[]
+  scalaMetrics: unknown
+  resultadoVocacional: ResultadoVocacional
 }
 
-const PERFIL_LABELS: Record<string, string> = {
-  tecnologico: "Tecnológico",
-  cientifico: "Científico",
-  numerico: "Numérico",
-  humanistico: "Humanístico",
-  social_comunicativo: "Social-Comunicativo",
+const PERFILES: Record<string, string> = {
+  tecnologico: 'Tecnológico',
+  cientifico: 'Científico',
+  numerico: 'Numérico',
+  humanistico: 'Humanístico',
+  social_comunicativo: 'Social-Comunicativo',
 }
-
-const CARRERA_LABELS: Record<string, string> = {
-  ingenieria_sistemas: "Ingeniería de Sistemas",
-  ingenieria_software: "Ingeniería de Software",
-  ciencia_datos: "Ciencia de Datos",
-  ingenieria_electronica: "Ingeniería Electrónica",
-  ingenieria_industrial: "Ingeniería Industrial",
-  ingenieria_civil: "Ingeniería Civil",
-  ingenieria_mecanica: "Ingeniería Mecánica",
-  arquitectura: "Arquitectura",
-  medicina: "Medicina",
-  enfermeria: "Enfermería",
-  biologia: "Biología",
-  psicologia: "Psicología",
-  derecho: "Derecho",
-  comunicacion: "Comunicación",
-  administracion: "Administración",
-  economia: "Economía",
-  contabilidad: "Contabilidad",
-  marketing: "Marketing",
-  educacion: "Educación",
+const CARRERAS: Record<string, string> = {
+  ingenieria_sistemas: 'Ingeniería de Sistemas',
+  ingenieria_software: 'Ingeniería de Software',
+  ciencia_datos: 'Ciencia de Datos',
+  ingenieria_electronica: 'Ingeniería Electrónica',
+  ingenieria_industrial: 'Ingeniería Industrial',
+  ingenieria_civil: 'Ingeniería Civil',
+  ingenieria_mecanica: 'Ingeniería Mecánica',
+  arquitectura: 'Arquitectura',
+  medicina: 'Medicina',
+  enfermeria: 'Enfermería',
+  biologia: 'Biología',
+  psicologia: 'Psicología',
+  derecho: 'Derecho',
+  comunicacion: 'Comunicación',
+  administracion: 'Administración',
+  economia: 'Economía',
+  contabilidad: 'Contabilidad',
+  marketing: 'Marketing',
+  educacion: 'Educación',
 }
-
-const ORDEN_PERFILES = [
-  "tecnologico",
-  "cientifico",
-  "numerico",
-  "humanistico",
-  "social_comunicativo",
-]
-
-function nombrePerfil(perfil: string) {
-  return PERFIL_LABELS[perfil] || perfil
-}
+const ORDEN_PERFILES = ['tecnologico', 'cientifico', 'numerico', 'humanistico', 'social_comunicativo']
 
 function nombreCarrera(carrera: string) {
-  if (CARRERA_LABELS[carrera]) {
-    return CARRERA_LABELS[carrera]
-  }
-
-  return carrera
-    .split("_")
-    .map(
-      (palabra) =>
-        palabra.charAt(0).toUpperCase() + palabra.slice(1)
-    )
-    .join(" ")
+  return CARRERAS[carrera] || carrera.replaceAll('_', ' ')
 }
-
-function limitarPorcentaje(valor: number) {
-  return Math.min(100, Math.max(0, valor))
+function porcentaje(numero: number) {
+  return `${Math.max(0, Math.min(100, numero))}%`
+}
+function EtiquetasMaterias({ materias, vacio }: { materias: Materia[]; vacio: string }) {
+  if (!materias.length) return <p className="text-xs text-slate-400">{vacio}</p>
+  return (
+    <div className="flex flex-wrap gap-2">
+      {materias.map((m, i) => (
+        <span key={`${m.nombre}-${i}`} className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200">
+          {m.nombre} <strong className="text-cyan-300">{m.nota.toFixed(2)}/20</strong>
+        </span>
+      ))}
+    </div>
+  )
 }
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<PipelineResult | null>(null)
+  const [archivo, setArchivo] = useState<File | null>(null)
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const [materias, setMaterias] = useState<MateriaEdit[]>([])
+  const [evaluacion, setEvaluacion] = useState<Evaluacion | null>(null)
+  const [cargando, setCargando] = useState<'extraer' | 'evaluar' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-
-    if (!file) return
-
-    setLoading(true)
+  function limpiarResultado() {
+    setPreview(null)
+    setEvaluacion(null)
+    setMaterias([])
     setError(null)
-    setResult(null)
+  }
+  function cambiarMateria(indice: number, campo: 'nombre' | 'nota', valor: string) {
+    setMaterias(actual => actual.map((m, i) => i === indice ? { ...m, [campo]: valor } : m))
+    setEvaluacion(null)
+  }
+  const materiasValidas = materias.length >= 3 && materias.every(m => {
+    if (!m.nombre.trim() || m.nombre.length > 100 || m.nota.trim() === '') return false
+    const n = Number(m.nota.replace(',', '.'))
+    return Number.isFinite(n) && n >= 0 && n <= 20
+  })
 
+  async function extraer(evento: React.FormEvent<HTMLFormElement>) {
+    evento.preventDefault()
+    if (!archivo) return
+    if (!archivo.name.toLowerCase().endsWith('.pdf') || archivo.size > 10 * 1024 * 1024) {
+      setError('Selecciona un PDF de máximo 10 MB.')
+      return
+    }
+    setCargando('extraer')
+    limpiarResultado()
     try {
-      const formData = new FormData()
-      formData.append("file", file)
-
-      const res = await fetch("/api/evaluar", {
-        method: "POST",
-        body: formData,
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        throw new Error(
-          data?.error ||
-            "ERR_PIPELINE_FAILURE: No se pudo procesar el flujo"
-        )
-      }
-
-      setResult(data)
-    } catch (err: any) {
-      setError(
-        err?.message ||
-          "Se produjo un error durante el diagnóstico"
-      )
+      const form = new FormData()
+      form.append('file', archivo)
+      const respuesta = await fetch('/api/extraer', { method: 'POST', body: form })
+      const json = await respuesta.json()
+      if (!respuesta.ok) throw new Error(json.error || 'No se pudo extraer el certificado.')
+      const datos = json as Preview
+      setPreview(datos)
+      setMaterias(datos.parsedData.materias.map(m => ({ nombre: m.nombre, nota: String(m.nota) })))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'No se pudo extraer el PDF.')
     } finally {
-      setLoading(false)
+      setCargando(null)
+    }
+  }
+  async function evaluar() {
+    if (!preview || !materiasValidas) return
+    setCargando('evaluar')
+    setError(null)
+    setEvaluacion(null)
+    try {
+      const respuesta = await fetch('/api/evaluar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          archivo_analizado: preview.parsedData.archivo_analizado,
+          materias: materias.map(m => ({ nombre: m.nombre.trim(), nota: Number(m.nota.replace(',', '.')) })),
+        }),
+      })
+      const json = await respuesta.json()
+      if (!respuesta.ok) throw new Error(json.error || 'El motor de recomendaciones no pudo evaluar los datos.')
+      setEvaluacion(json as Evaluacion)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Falló la evaluación.')
+    } finally {
+      setCargando(null)
     }
   }
 
-  const resultado = result?.resultadoVocacional
-
-  const perfilDominante =
-    resultado?.perfil_dominante || ""
-
-  const puntuacionDominante =
-    resultado?.perfiles?.[perfilDominante] ?? 0
+  const analisis = evaluacion?.analisis || preview?.analisis
+  const motor = evaluacion?.resultadoVocacional
+  const perfil = motor?.perfil_dominante || ''
 
   return (
-    <main className="min-h-screen bg-[#090A0F] text-[#E2E8F0] px-4 py-10 font-mono selection:bg-purple-500 selection:text-white">
-      <div className="w-full max-w-5xl mx-auto bg-[#12151E]/90 border border-purple-500/30 p-6 md:p-8 rounded-2xl shadow-[0_0_40px_rgba(168,85,247,0.15)] backdrop-blur-md relative overflow-hidden">
+    <main className="min-h-screen bg-[#090A0F] px-4 py-10 font-mono text-slate-200">
+      <div className="mx-auto max-w-5xl space-y-6 rounded-2xl border border-purple-500/30 bg-[#12151E] p-5 shadow-[0_0_40px_rgba(168,85,247,0.13)] md:p-8">
+        <header>
+          <p className="mb-2 text-xs uppercase tracking-[0.18em] text-purple-400">SYS.MULTI // V2.0</p>
+          <h1 className="text-2xl font-bold text-white md:text-3xl">EVALUADOR VOCACIONAL</h1>
+          <p className="mt-2 text-xs text-slate-400">PYTHON ➔ REVISIÓN DE NOTAS ➔ SCALA ➔ PROLOG</p>
+        </header>
 
-        {/* Nebulosas */}
-        <div className="absolute -top-24 -right-24 w-72 h-72 bg-purple-600/20 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="absolute -bottom-24 -left-24 w-72 h-72 bg-cyan-500/20 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="relative z-10">
-
-          {/* CABECERA */}
-          <div className="flex items-center gap-2 mb-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-purple-400 animate-pulse shadow-[0_0_8px_#c084fc]" />
-
-            <span className="text-xs tracking-widest text-purple-400 uppercase">
-              SYS.MULTI // V1.0
-            </span>
-          </div>
-
-          <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white mb-1 drop-shadow-[0_2px_10px_rgba(168,85,247,0.4)]">
-            EVALUADOR VOCACIONAL
-          </h1>
-
-          <p className="text-xs text-slate-400 mb-7">
-            PIPELINE: [PY] ➔ [SCALA] ➔ [PROLOG]
-          </p>
-
-          {/* FORMULARIO */}
-          <form
-            onSubmit={handleSubmit}
-            className="space-y-5"
-          >
-            <div className="p-5 rounded-xl border border-dashed border-purple-500/40 bg-purple-950/10 hover:border-purple-400/70 transition-all text-center">
-
-              <label className="block text-xs uppercase tracking-wider text-purple-300 mb-3">
-                // SELECCIONAR CERTIFICADO ACADÉMICO (PDF)
-              </label>
-
-              <label className="relative inline-block cursor-pointer">
-
-                <input
-                  type="file"
-                  accept=".pdf,application/pdf"
-                  onChange={(e) => {
-                    setFile(
-                      e.target.files?.[0] || null
-                    )
-                    setResult(null)
-                    setError(null)
-                  }}
-                  className="hidden"
-                />
-
-                <span className="py-2.5 px-6 rounded-lg border border-purple-500/50 text-xs font-bold bg-purple-950 text-purple-200 hover:bg-purple-900/80 hover:shadow-[0_0_15px_rgba(168,85,247,0.4)] transition-all inline-block">
-                  {file
-                    ? file.name
-                    : "SELECCIONAR ARCHIVO"}
-                </span>
-
-              </label>
-
-              {file && (
-                <p className="text-[10px] text-cyan-400 mt-3">
-                  ARCHIVO CARGADO: {file.name}
-                </p>
-              )}
-
-            </div>
-
-            {/* BOTÓN */}
-            <div className="relative group">
-
-              <div className="absolute -inset-0.5 bg-gradient-to-r from-purple-500 via-fuchsia-500 to-cyan-500 rounded-xl blur opacity-60 group-hover:opacity-100 transition duration-300 pointer-events-none" />
-
-              <button
-                type="submit"
-                disabled={!file || loading}
-                className="relative w-full py-3 px-6 bg-[#0E1017] text-white rounded-xl font-bold text-xs tracking-widest uppercase border border-purple-500/40 disabled:opacity-40 disabled:pointer-events-none hover:bg-purple-950/40 transition-all flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <>
-                    <span className="w-3 h-3 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
-                    ANALIZANDO CERTIFICADO...
-                  </>
-                ) : (
-                  "INICIAR DIAGNÓSTICO"
-                )}
-              </button>
-
-            </div>
+        <section className="space-y-4 rounded-xl border border-purple-500/30 bg-purple-950/10 p-5">
+          <h2 className="font-bold text-white">1. Carga tu certificado</h2>
+          <p className="text-xs text-slate-400">Solo PDF con texto seleccionable, hasta 10 MB. Los PDF escaneados requieren OCR, que aún no está disponible.</p>
+          <form onSubmit={extraer} className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <input
+              aria-label="Seleccionar certificado PDF"
+              type="file"
+              accept=".pdf,application/pdf"
+              className="block w-full min-w-0 text-xs file:mr-3 file:rounded-lg file:border file:border-purple-500/50 file:bg-purple-950 file:px-3 file:py-2 file:text-purple-200"
+              onChange={e => {
+                setArchivo(e.target.files?.[0] ?? null)
+                limpiarResultado()
+              }}
+            />
+            <button disabled={!archivo || cargando !== null} className="rounded-lg bg-purple-600 px-5 py-3 text-xs font-bold text-white hover:bg-purple-500 disabled:opacity-50">
+              {cargando === 'extraer' ? 'EXTRAYENDO...' : 'EXTRAER NOTAS'}
+            </button>
           </form>
+        </section>
 
-          {/* ERROR */}
-          {error && (
-            <div className="mt-5 p-4 bg-red-950/30 text-red-400 rounded-xl text-xs border border-red-500/30 shadow-[0_0_15px_rgba(239,68,68,0.1)]">
-              &gt; ERROR: {error}
+        {error && <div role="alert" className="rounded-xl border border-red-500/40 bg-red-950/20 p-4 text-sm text-red-300">{error}</div>}
+
+        {preview && (
+          <section className="space-y-4 rounded-xl border border-cyan-500/30 bg-[#0C1018] p-5">
+            <div>
+              <h2 className="text-lg font-bold text-white">2. Revisa las materias extraídas</h2>
+              <p className="mt-2 text-xs text-slate-400">
+                Corrige cualquier materia o nota antes de calcular las carreras. Las notas deben estar entre 0 y 20.
+              </p>
+              <p className="mt-1 text-xs text-cyan-400">Documento: {preview.parsedData.archivo_analizado}</p>
             </div>
-          )}
-
-          {/* RESULTADOS */}
-          {resultado && (
-            <div className="mt-8 space-y-6">
-
-              {/* ESTADO */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-purple-500/20 pb-4">
-
-                <div>
-                  <p className="text-[10px] text-purple-400 tracking-widest uppercase">
-                    // RESULTADO DEL ANÁLISIS
-                  </p>
-
-                  <h2 className="text-xl font-bold text-white mt-1">
-                    DIAGNÓSTICO ACADÉMICO
-                  </h2>
-                </div>
-
-                <span className="text-[10px] text-emerald-400 border border-emerald-500/30 bg-emerald-950/20 rounded-full px-3 py-1">
-                  ● PIPELINE COMPLETADO
-                </span>
-
-              </div>
-
-              {/* PERFIL DOMINANTE */}
-              <section className="relative overflow-hidden rounded-2xl border border-purple-500/40 bg-gradient-to-br from-purple-950/50 to-[#0C1018] p-6">
-
-                <div className="absolute top-0 right-0 w-40 h-40 bg-purple-500/10 rounded-full blur-3xl" />
-
-                <p className="text-[10px] text-purple-300 tracking-[0.2em] uppercase mb-3">
-                  Perfil académico predominante
-                </p>
-
-                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-
-                  <div>
-                    <h3 className="text-3xl md:text-4xl font-black text-white uppercase tracking-tight">
-                      {nombrePerfil(
-                        perfilDominante
-                      )}
-                    </h3>
-
-                    <p className="text-xs text-slate-400 mt-2 max-w-xl">
-                      Este perfil se obtiene a partir del
-                      rendimiento académico detectado en
-                      las materias del certificado.
-                    </p>
-                  </div>
-
-                  <div className="text-left sm:text-right">
-                    <span className="text-4xl font-black text-cyan-300">
-                      {puntuacionDominante.toFixed(
-                        1
-                      )}
-                    </span>
-
-                    <span className="text-lg text-cyan-500">
-                      %
-                    </span>
-                  </div>
-
-                </div>
-
-              </section>
-
-              {/* PERFILES ACADÉMICOS */}
-              <section className="rounded-2xl border border-slate-700/60 bg-[#0C0F16]/80 p-5 md:p-6">
-
-                <div className="mb-5">
-                  <p className="text-[10px] text-cyan-400 tracking-widest uppercase">
-                    // MATRIZ DE FORTALEZAS
-                  </p>
-
-                  <h3 className="text-lg font-bold text-white mt-1">
-                    Perfiles académicos
-                  </h3>
-                </div>
-
-                <div className="space-y-5">
-
-                  {ORDEN_PERFILES.map(
-                    (perfil) => {
-                      const valor =
-                        resultado.perfiles?.[
-                          perfil
-                        ] ?? 0
-
-                      return (
-                        <div key={perfil}>
-
-                          <div className="flex justify-between items-center mb-2">
-
-                            <span className="text-xs text-slate-300">
-                              {nombrePerfil(
-                                perfil
-                              )}
-                            </span>
-
-                            <span className="text-xs font-bold text-cyan-300">
-                              {valor.toFixed(
-                                1
-                              )}
-                              %
-                            </span>
-
-                          </div>
-
-                          <div className="h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
-
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-purple-500 via-fuchsia-500 to-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.35)] transition-all duration-700"
-                              style={{
-                                width: `${limitarPorcentaje(
-                                  valor
-                                )}%`,
-                              }}
-                            />
-
-                          </div>
-
-                        </div>
-                      )
-                    }
-                  )}
-
-                </div>
-
-              </section>
-
-              {/* TOP CARRERAS */}
-              <section className="rounded-2xl border border-purple-500/30 bg-[#0C0F16]/80 p-5 md:p-6">
-
-                <div className="mb-5">
-
-                  <p className="text-[10px] text-purple-400 tracking-widest uppercase">
-                    // MOTOR EXPERTO PROLOG
-                  </p>
-
-                  <h3 className="text-lg font-bold text-white mt-1">
-                    Carreras recomendadas
-                  </h3>
-
-                  <p className="text-xs text-slate-500 mt-1">
-                    Ordenadas según compatibilidad con
-                    tu perfil académico.
-                  </p>
-
-                </div>
-
-                <div className="space-y-3">
-
-                  {resultado.recomendaciones.map(
-                    (
-                      recomendacion,
-                      index
-                    ) => (
-                      <div
-                        key={`${recomendacion.carrera}-${index}`}
-                        className="group flex items-center gap-4 rounded-xl border border-slate-800 bg-[#090B11] p-4 hover:border-purple-500/50 hover:bg-purple-950/10 transition-all"
-                      >
-
-                        {/* POSICIÓN */}
-                        <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-purple-950/60 border border-purple-500/30 flex items-center justify-center text-purple-300 font-black">
-                          {String(
-                            index + 1
-                          ).padStart(
-                            2,
-                            "0"
-                          )}
-                        </div>
-
-                        {/* CARRERA */}
-                        <div className="flex-1 min-w-0">
-
-                          <h4 className="text-sm md:text-base font-bold text-white">
-                            {nombreCarrera(
-                              recomendacion.carrera
-                            )}
-                          </h4>
-
-                          <div className="mt-2 h-1.5 bg-slate-900 rounded-full overflow-hidden">
-
-                            <div
-                              className="h-full bg-gradient-to-r from-purple-500 to-cyan-400 rounded-full"
-                              style={{
-                                width: `${limitarPorcentaje(
-                                  recomendacion.compatibilidad
-                                )}%`,
-                              }}
-                            />
-
-                          </div>
-
-                        </div>
-
-                        {/* PORCENTAJE */}
-                        <div className="text-right flex-shrink-0">
-
-                          <span className="text-lg md:text-xl font-black text-cyan-300">
-                            {recomendacion.compatibilidad.toFixed(
-                              2
-                            )}
-                          </span>
-
-                          <span className="text-xs text-cyan-500">
-                            %
-                          </span>
-
-                        </div>
-
-                      </div>
-                    )
-                  )}
-
-                </div>
-
-              </section>
-
-              {/* AVISO */}
-              <div className="rounded-xl border border-amber-500/20 bg-amber-950/10 p-4">
-
-                <p className="text-[10px] leading-relaxed text-amber-200/70">
-                  ESTE RESULTADO CONSTITUYE UNA
-                  ORIENTACIÓN BASADA EN RENDIMIENTO
-                  ACADÉMICO. NO SUSTITUYE UNA
-                  EVALUACIÓN VOCACIONAL PSICOLÓGICA
-                  PROFESIONAL.
-                </p>
-
-              </div>
-
-              {/* INFORMACIÓN TÉCNICA */}
-              <details className="rounded-xl border border-slate-800 bg-[#080A0F]">
-
-                <summary className="cursor-pointer p-4 text-[10px] uppercase tracking-widest text-slate-500 hover:text-purple-300 transition-colors">
-                  // VER DATOS TÉCNICOS DEL PIPELINE
-                </summary>
-
-                <pre className="text-[11px] text-cyan-300 overflow-auto max-h-72 p-4 border-t border-slate-800">
-                  {JSON.stringify(
-                    result,
-                    null,
-                    2
-                  )}
-                </pre>
-
-              </details>
-
+            {preview.advertencias?.map((aviso, i) => (
+              <p key={i} className="rounded-lg border border-amber-600/30 bg-amber-950/20 p-3 text-xs text-amber-200">Aviso: {aviso}</p>
+            ))}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[480px] text-left text-xs">
+                <thead className="bg-slate-800 text-slate-200">
+                  <tr><th className="p-3">Materia</th><th className="p-3">Nota / 20</th><th className="p-3">Acción</th></tr>
+                </thead>
+                <tbody>
+                  {materias.map((m, indice) => (
+                    <tr key={indice} className="border-b border-slate-800">
+                      <td className="p-2">
+                        <input aria-label={`Materia ${indice + 1}`} value={m.nombre} onChange={e => cambiarMateria(indice, 'nombre', e.target.value)} maxLength={100} className="w-full rounded-md border border-slate-700 bg-slate-900 p-2 text-white" />
+                      </td>
+                      <td className="p-2">
+                        <input aria-label={`Nota ${indice + 1}`} value={m.nota} onChange={e => cambiarMateria(indice, 'nota', e.target.value)} inputMode="decimal" className="w-28 rounded-md border border-slate-700 bg-slate-900 p-2 text-white" />
+                      </td>
+                      <td className="p-2">
+                        <button type="button" onClick={() => { setMaterias(actual => actual.filter((_, i) => i !== indice)); setEvaluacion(null) }} className="rounded-md border border-red-500/30 px-3 py-2 text-red-300 hover:bg-red-950/30">Quitar</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          )}
+            <button type="button" onClick={() => { setMaterias(actual => [...actual, { nombre: '', nota: '' }]); setEvaluacion(null) }} disabled={materias.length >= 150} className="rounded-lg border border-slate-600 px-4 py-2 text-xs hover:bg-slate-800 disabled:opacity-40">+ Añadir materia</button>
+            {!materiasValidas && <p className="text-xs text-amber-300">Completa al menos 3 materias con nombres y notas válidos (0 a 20).</p>}
+            <button onClick={evaluar} disabled={!materiasValidas || cargando !== null} className="block w-full rounded-xl bg-gradient-to-r from-purple-600 to-cyan-700 px-5 py-3 text-xs font-bold text-white hover:brightness-110 disabled:opacity-50">
+              {cargando === 'evaluar' ? 'CALCULANDO PERFILES Y CARRERAS...' : '3. CONFIRMAR NOTAS Y EVALUAR'}
+            </button>
+          </section>
+        )}
 
-        </div>
+        {analisis && (
+          <section className="space-y-4 rounded-xl border border-slate-700 bg-[#0C0F16] p-5">
+            <h2 className="text-lg font-bold text-white">Análisis académico de Python</h2>
+            <p className="text-xs text-slate-400">
+              {evaluacion ? 'Análisis actualizado con las notas confirmadas.' : 'Vista inicial: se actualizará después de confirmar las notas.'}
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg bg-slate-900 p-4"><p className="text-xs text-slate-400">Promedio simple</p><p className="mt-1 text-2xl font-bold text-cyan-300">{analisis.promedio_calculado.toFixed(2)}</p></div>
+              <div className="rounded-lg bg-slate-900 p-4"><p className="text-xs text-slate-400">Materias</p><p className="mt-1 text-2xl font-bold text-white">{analisis.materias_analizadas}</p></div>
+              <div className="rounded-lg bg-slate-900 p-4"><p className="text-xs text-slate-400">Áreas detectadas</p><p className="mt-1 text-2xl font-bold text-white">{analisis.areas_detectadas.length}/6</p></div>
+            </div>
+            <div><h3 className="mb-2 text-sm font-semibold text-emerald-300">Fortalezas (≥ 16)</h3><EtiquetasMaterias materias={analisis.fortalezas} vacio="Ninguna materia supera el umbral de fortaleza establecido." /></div>
+            <div><h3 className="mb-2 text-sm font-semibold text-amber-300">Áreas por reforzar (≤ 12)</h3><EtiquetasMaterias materias={analisis.areas_por_reforzar} vacio="No se detectaron materias por debajo del umbral establecido." /></div>
+            <p className="text-xs text-slate-500">{analisis.nota_metodologica}</p>
+          </section>
+        )}
+
+        {motor && (
+          <div className="space-y-5">
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/10 p-4 text-xs text-emerald-300">Evaluación completada: Python, Scala y Prolog.</div>
+            {(evaluacion?.advertencias ?? []).map((aviso, i) => <p key={i} className="rounded-lg border border-amber-600/30 p-3 text-xs text-amber-200">Aviso: {aviso}</p>)}
+            <section className="rounded-xl border border-purple-500/30 bg-purple-950/10 p-5">
+              <h2 className="text-sm text-purple-300">Perfil académico predominante</h2>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <h3 className="text-2xl font-bold text-white">{PERFILES[perfil] || perfil}</h3>
+                <p className="text-2xl font-bold text-cyan-300">{(motor.perfiles[perfil] ?? 0).toFixed(1)}%</p>
+              </div>
+            </section>
+            <section className="rounded-xl border border-slate-700 p-5">
+              <h2 className="mb-4 text-lg font-bold text-white">Perfiles académicos — Scala</h2>
+              <div className="space-y-4">
+                {ORDEN_PERFILES.map(nombre => (
+                  <div key={nombre}>
+                    <div className="mb-2 flex justify-between text-xs"><span>{PERFILES[nombre]}</span><span className="text-cyan-300">{(motor.perfiles[nombre] ?? 0).toFixed(2)}%</span></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full bg-gradient-to-r from-purple-500 to-cyan-400" style={{ width: porcentaje(motor.perfiles[nombre] ?? 0) }} /></div>
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section className="rounded-xl border border-slate-700 p-5">
+              <h2 className="mb-4 text-lg font-bold text-white">Top 5 de carreras — Prolog</h2>
+              <div className="space-y-3">
+                {motor.recomendaciones.map((r, indice) => (
+                  <div key={`${r.carrera}-${indice}`} className="rounded-xl border border-slate-800 bg-[#090B11] p-4">
+                    <div className="mb-2 flex justify-between gap-3 text-sm"><strong>{indice + 1}. {nombreCarrera(r.carrera)}</strong><strong className="text-cyan-300">{r.compatibilidad.toFixed(2)}%</strong></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full bg-gradient-to-r from-purple-500 to-cyan-400" style={{ width: porcentaje(r.compatibilidad) }} /></div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-4 text-xs text-amber-200/80">Estos puntajes reflejan reglas académicas del prototipo, no probabilidades de éxito profesional ni un diagnóstico psicológico.</p>
+            </section>
+            <details className="rounded-xl border border-slate-800 p-4">
+              <summary className="cursor-pointer text-xs text-slate-400">VER DATOS TÉCNICOS</summary>
+              <pre className="mt-3 max-h-80 overflow-auto text-[11px] text-cyan-300">{JSON.stringify(evaluacion, null, 2)}</pre>
+            </details>
+          </div>
+        )}
       </div>
     </main>
   )
